@@ -1,38 +1,53 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RecordWildCards #-}
+
 module Main
   where
 
-import           Control.Monad
-import qualified Data.ByteString.Char8 as C
-import qualified Data.ByteString.Lazy as LB
-import qualified Data.ByteString.Lazy.UTF8 as U8
-import           Data.List
-import           Data.Ord
+import           Control.Exception
+import           HSH
 import           Options.Applicative
-import           Options.Applicative.Builder
-import           Text.Regex.TDFA
-import           Text.Regex.TDFA.ByteString
 
-import Debug.Trace
+--import           Debug.Trace
 
-data ShellCommand =
-  ShellCommand { exeName :: String
+import           ContainerJson
+
+data CmdLineOpts =
+  CmdLineOpts { containerId :: String
+               , exeName :: String
                , exeArgs :: [String]
                } deriving (Show)
 
-parseArgs :: Parser ShellCommand
+parseArgs :: Parser CmdLineOpts
 parseArgs =
-  ShellCommand <$> argument str (metavar "EXECUTABLE")
-               <*> many (argument str (metavar "ARGS..." ))
+  CmdLineOpts <$> argument str (metavar "CONTAINER_ID")
+              <*> argument str (metavar "EXECUTABLE")
+              <*> many (argument str (metavar "ARGS..." ))
 
 
 main :: IO ()
-main = execParser opts >>= putStrLn . show
+main = execParser opts >>= runMain
   where
     opts = info (helper <*> parseArgs) $
              fullDesc
-             <> progDesc "Sorts lines of text using a few built-in functions: semver, date."
-             <> header "Sorts lines of text using a few built-in functions."
+             <> progDesc "Wraps up some steps mentioned in https://docs.docker.com/articles/runmetrics/ (ip netns section), needs sudo access."
+             <> header "Executes given command in the docker container's netwok namespace."
+             <> footer "E.g. docker-netns -- 9ef24eba0123 netstat -anp"
 
 
+runMain :: CmdLineOpts -> IO ()
+runMain cmd = do
+  let CmdLineOpts{..} = cmd
+  containerJson <- run $ ("docker", ["inspect", containerId]) :: IO String
 
+  let pid = case parseProcessId containerJson
+                 of Just x -> x
+                    Nothing -> error $ "Couldn't extract container process ID from the output of docker inspect"
 
+  runIO $ ("mkdir", ["-pv", "/var/run/netns"])
+  let nsname = (show pid) <> "-" <> containerId
+  _ <- bracket (runIO $ ("ln", ["-s", "/proc/" <> (show pid) <> "/ns/net", "/var/run/netns/" <> nsname]))
+               (\_ -> runIO $ ("rm", ["-f", "/var/run/netns/" <> nsname]))
+               (\_ -> runIO $ ("ip", "netns" : "exec" : nsname : exeName : exeArgs))
+
+  return ()
